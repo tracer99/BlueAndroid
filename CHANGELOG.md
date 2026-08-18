@@ -13,6 +13,19 @@ BlueDeck is a fork of [BlueBridge for Android](https://github.com/Nelwyn99) by N
 
 See `.cursor/rules/release-workflow.mdc` for agent workflow details.
 
+## [1.12.1] - 2026-07-21
+
+### Fixed
+
+- Idle “fake logged in” state: when the access token has expired and refresh fails (except clear network/5xx blips), clear the session and return to login instead of leaving a non-working dashboard.
+- Canada and Kia US: invalidate the session on definitive auth failures (vehicle list, status, and Canada commands) so the UI cannot stay signed in with dead credentials.
+- App resume: validate the session before loading vehicles; route to login or OTP when auth is no longer usable.
+
+### Changed
+
+- Login screen: clarify that the Bluelink PIN is optional and saved so remote commands do not prompt every time (not a password or 2FA code).
+- Canada login: explain why a verification code may be required (website-style device trust) and recommend “Trust this device for 90 days.”
+
 ## [1.12.0] - 2026-07-17
 
 ### Added

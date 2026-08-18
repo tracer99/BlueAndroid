@@ -375,7 +375,7 @@ fun LoginScreen(
                     servicePin = value.filter { it.isDigit() }.take(4)
                     authViewModel.clearError()
                 },
-                label = { Text("Bluelink PIN") },
+                label = { Text("Bluelink PIN (optional)") },
                 leadingIcon = { Icon(Icons.Filled.Lock, null) },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(
@@ -398,7 +398,7 @@ fun LoginScreen(
             )
 
             Text(
-                text = "Required for unlock, remote start, horn, and lights.",
+                text = "Save your 4-digit PIN here so you won't be asked again on every remote command (lock, climate, horn, etc.). This is not your login password or a verification code.",
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier
@@ -406,9 +406,37 @@ fun LoginScreen(
                     .padding(top = 6.dp)
             )
 
+            if (!otpRequired && selectedRegion.isCanada) {
+                Spacer(Modifier.height(16.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Canada accounts may need a one-time verification code on this device " +
+                            "(same as mybluelink.ca / the website). After verifying, check " +
+                            "“Trust this device for 90 days” to skip repeat prompts. " +
+                            "This is separate from the Bluelink PIN above. " +
+                            "The official app uses a different login path and may not ask for this code.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
             if (otpRequired) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = "Verification code — required for new device sign-in only.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                    )
                     uiState.otpChallenge?.message?.let { message ->
                         Surface(
                             color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
@@ -503,19 +531,27 @@ fun LoginScreen(
                         )
                     }
                     if (uiState.otpChallenge?.supportsTrustDevice == true) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = rememberDevice,
-                                onCheckedChange = { rememberDevice = it },
-                                colors = loginCheckboxColors()
-                            )
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = rememberDevice,
+                                    onCheckedChange = { rememberDevice = it },
+                                    colors = loginCheckboxColors()
+                                )
+                                Text(
+                                    text = "Trust this device for 90 days",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                             Text(
-                                text = "Trust this device for 90 days",
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
-                                style = MaterialTheme.typography.bodyMedium
+                                text = "Recommended — avoids repeating verification codes, similar to staying signed in on the official app.",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(start = 48.dp, end = 8.dp, bottom = 4.dp)
                             )
                         }
                     }

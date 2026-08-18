@@ -194,6 +194,40 @@ class VehicleRepository @Inject constructor(
 
     private suspend fun bearerToken(): String = "Bearer ${getToken()}"
 
+    /**
+     * Clears local tokens when auth is definitively dead so the UI cannot stay
+     * "logged in" with a non-working session (zombie / fake logged-in state).
+     */
+    private suspend fun invalidateSessionOnAuthFailure() {
+        preferencesManager.clearSession(requirePassword = true)
+    }
+
+    private suspend fun sessionExpiredError(httpCode: Int? = null): Result.Error {
+        invalidateSessionOnAuthFailure()
+        return Result.Error("Session expired. Please sign in again.", httpCode)
+    }
+
+    private suspend fun throwSessionExpired(message: String = "Session expired. Please sign in again."): Nothing {
+        invalidateSessionOnAuthFailure()
+        throw IllegalStateException(message)
+    }
+
+    /**
+     * Proactively renew the access token (or fail clearly). Called on app resume so a
+     * locally "logged in" UI does not sit on a dead session after idle periods.
+     */
+    suspend fun validateSession(): Result<Unit> {
+        if (preferencesManager.isDemoMode()) return Result.Success(Unit)
+        return try {
+            ensureValidAccessToken()
+            Result.Success(Unit)
+        } catch (e: OtpRequiredException) {
+            Result.Error(e.message ?: "Verification code required.", OTP_REQUIRED_CODE)
+        } catch (e: Exception) {
+            Result.Error(e.message ?: "Could not validate session")
+        }
+    }
+
     private suspend fun ensureValidAccessToken(): String = tokenRefreshMutex.withLock {
         val accessToken = preferencesManager.accessToken.first().orEmpty()
         val refreshToken = preferencesManager.refreshToken.first().orEmpty()
@@ -202,13 +236,14 @@ class VehicleRepository @Inject constructor(
         }
 
         val expiresAt = preferencesManager.tokenExpiresAt.first()
-        if (accessToken.isNotBlank() && expiresAt > System.currentTimeMillis() + 60_000L) {
+        val accessTokenStillValid =
+            accessToken.isNotBlank() && expiresAt > System.currentTimeMillis() + 60_000L
+        if (accessTokenStillValid) {
             return accessToken
         }
 
         if (refreshToken.isBlank()) {
-            preferencesManager.clearSession(requirePassword = true)
-            throw IllegalStateException("Session expired. Please sign in again.")
+            throwSessionExpired()
         }
 
         return try {
@@ -222,28 +257,28 @@ class VehicleRepository @Inject constructor(
         } catch (e: OtpRequiredException) {
             throw e
         } catch (e: Exception) {
-            if (isHardAuthRefreshFailure(e)) {
-                preferencesManager.clearSession(requirePassword = true)
-                throw IllegalStateException(e.message ?: "Session expired. Please sign in again.")
+            // Access token is already expired here. Keep the session only for clear
+            // transient network/5xx failures; otherwise clear so the UI cannot look logged in.
+            if (isHardAuthRefreshFailure(e) || !isTransientNetworkFailure(e)) {
+                throwSessionExpired(e.message ?: "Session expired. Please sign in again.")
             }
-            // Keep tokens on network/transient failures so the user is not bounced to login.
             throw IllegalStateException(e.message ?: "Could not refresh session. Check your connection and try again.")
         }
     }
 
     /**
-     * True when a refresh failure means the stored credentials/tokens are no longer usable.
-     * Network blips and 5xx must not wipe the session (official apps retry; they do not log out).
+     * True when a refresh failure is a temporary transport/server issue (retry later).
+     * These must not wipe the session while an access token might still be usable,
+     * or while a refresh can succeed after connectivity returns.
      */
-    private fun isHardAuthRefreshFailure(error: Throwable): Boolean {
-        if (error is IOException) return false
+    private fun isTransientNetworkFailure(error: Throwable): Boolean {
+        if (error is IOException) return true
         val message = generateSequence(error) { it.cause }
             .mapNotNull { it.message }
             .joinToString(" ")
             .lowercase()
         if (message.isBlank()) return false
-        if (
-            message.contains("timeout") ||
+        return message.contains("timeout") ||
             message.contains("unable to resolve host") ||
             message.contains("failed to connect") ||
             message.contains("connection reset") ||
@@ -252,9 +287,19 @@ class VehicleRepository @Inject constructor(
             message.contains("unreachable") ||
             message.contains("sslhandshake") ||
             Regex("\\b5\\d{2}\\b").containsMatchIn(message)
-        ) {
-            return false
-        }
+    }
+
+    /**
+     * True when a refresh failure means the stored credentials/tokens are no longer usable.
+     * Network blips and 5xx must not wipe the session (official apps retry; they do not log out).
+     */
+    private fun isHardAuthRefreshFailure(error: Throwable): Boolean {
+        if (isTransientNetworkFailure(error)) return false
+        val message = generateSequence(error) { it.cause }
+            .mapNotNull { it.message }
+            .joinToString(" ")
+            .lowercase()
+        if (message.isBlank()) return false
         return message.contains("invalid_grant") ||
             message.contains("invalid_token") ||
             message.contains("invalid token") ||
@@ -869,8 +914,7 @@ class VehicleRepository @Inject constructor(
     private suspend fun refreshCanadaAccessToken(): String {
         val savedCredentials = secureCredentialsManager.getSavedCredentials()
         if (savedCredentials == null) {
-            preferencesManager.clearSession(requirePassword = true)
-            throw IllegalStateException("Session expired. Please sign in again.")
+            throwSessionExpired()
         }
 
         return when (
@@ -885,8 +929,7 @@ class VehicleRepository @Inject constructor(
                 .orEmpty()
                 .takeIf { it.isNotBlank() }
                 ?: run {
-                    preferencesManager.clearSession(requirePassword = true)
-                    throw IllegalStateException("Sign-in succeeded but no access token was saved")
+                    throwSessionExpired("Sign-in succeeded but no access token was saved")
                 }
             is Result.Error -> {
                 if (result.code == OTP_REQUIRED_CODE) {
@@ -894,7 +937,7 @@ class VehicleRepository @Inject constructor(
                 }
                 val failure = IllegalStateException(result.message)
                 if (result.code == 401 || result.code == 403 || isHardAuthRefreshFailure(failure)) {
-                    preferencesManager.clearSession(requirePassword = true)
+                    invalidateSessionOnAuthFailure()
                 }
                 throw failure
             }
@@ -903,7 +946,9 @@ class VehicleRepository @Inject constructor(
 
     /**
      * Re-authenticate once when the Canadian API rejects the current access token.
-     * Returns a fresh token, or null when the session should be treated as expired.
+     * Returns a fresh token, or null when the session was invalidated (caller should surface
+     * "Session expired"). Throws [OtpRequiredException] when MFA is required, or a soft
+     * [IllegalStateException] for transient network failures (session kept).
      */
     private suspend fun canadaAccessTokenAfterAuthFailure(
         httpCode: Int,
@@ -912,10 +957,22 @@ class VehicleRepository @Inject constructor(
     ): String? {
         if (!isCanadaAuthFailure(httpCode, json)) return null
         if (alreadyRetried) {
-            preferencesManager.clearSession(requirePassword = true)
+            invalidateSessionOnAuthFailure()
             return null
         }
-        return runCatching { refreshCanadaAccessToken() }.getOrNull()
+        return try {
+            refreshCanadaAccessToken()
+        } catch (e: OtpRequiredException) {
+            throw e
+        } catch (e: Exception) {
+            if (isTransientNetworkFailure(e)) {
+                throw IllegalStateException(
+                    e.message ?: "Could not refresh session. Check your connection and try again."
+                )
+            }
+            invalidateSessionOnAuthFailure()
+            null
+        }
     }
 
     private suspend fun getCanadaVehicles(): Result<List<Vehicle>> {
@@ -938,7 +995,7 @@ class VehicleRepository @Inject constructor(
                 val refreshedToken = canadaAccessTokenAfterAuthFailure(response.code(), json, retried)
                 if (refreshedToken != null) return fetchCanadaVehicles(refreshedToken, retried = true)
                 if (isCanadaAuthFailure(response.code(), json)) {
-                    return Result.Error("Session expired. Please sign in again.", response.code())
+                    return sessionExpiredError(response.code())
                 }
                 return Result.Error(canadaErrorMessage(json, "Failed to fetch Canadian vehicles (${response.code()})"), response.code())
             }
@@ -1020,7 +1077,7 @@ class VehicleRepository @Inject constructor(
                 )
             }
             if (isCanadaAuthFailure(response.code(), json)) {
-                return Result.Error("Session expired. Please sign in again.", response.code())
+                return sessionExpiredError(response.code())
             }
             return Result.Error(canadaErrorMessage(json, "Canadian status fetch failed (${response.code()})"), response.code())
         }
@@ -1108,7 +1165,7 @@ class VehicleRepository @Inject constructor(
                 return getCanadaPinAuth(refreshedToken, vehicleId, pin, deviceId, retried = true)
             }
             if (isCanadaAuthFailure(response.code(), json)) {
-                throw IllegalStateException("Session expired. Please sign in again.")
+                throwSessionExpired()
             }
             throw IllegalStateException(canadaErrorMessage(json, "Canadian PIN verification failed (${response.code()})"))
         }
@@ -1214,7 +1271,7 @@ class VehicleRepository @Inject constructor(
                 if (refreshedToken != null) {
                     executeCanadaPinCommand(vin, registrationId, actionName, call, retried = true)
                 } else {
-                    Result.Error("Session expired. Please sign in again.", outcome.httpCode)
+                    sessionExpiredError(outcome.httpCode)
                 }
             }
         }
@@ -1332,7 +1389,7 @@ class VehicleRepository @Inject constructor(
                                 retriedAuth = true
                             )
                         } else {
-                            Result.Error("Session expired. Please sign in again.", outcome.httpCode)
+                            sessionExpiredError(outcome.httpCode)
                         }
                     }
                 }
@@ -1361,7 +1418,7 @@ class VehicleRepository @Inject constructor(
                             retriedAuth = true
                         )
                     } else {
-                        Result.Error("Session expired. Please sign in again.", firstOutcome.httpCode)
+                        sessionExpiredError(firstOutcome.httpCode)
                     }
                 }
                 is CanadaCommandOutcome.Failed -> {
@@ -1393,7 +1450,7 @@ class VehicleRepository @Inject constructor(
                             Result.Error(message, retryOutcome.code)
                         }
                         is CanadaCommandOutcome.AuthFailed ->
-                            Result.Error("Session expired. Please sign in again.", retryOutcome.httpCode)
+                            sessionExpiredError(retryOutcome.httpCode)
                     }
                 }
             }
@@ -2742,6 +2799,9 @@ class VehicleRepository @Inject constructor(
             val response = getKiaUsApiService().getVehicles(sid)
             val json = response.body()
             if (!response.isSuccessful || kiaUsStatusFailed(json)) {
+                if (response.code() == 401 || response.code() == 403) {
+                    return sessionExpiredError(response.code())
+                }
                 return Result.Error(kiaUsErrorMessage(json, "Failed to fetch Kia vehicles (${response.code()})"), response.code())
             }
 
@@ -3129,8 +3189,7 @@ class VehicleRepository @Inject constructor(
                 Result.Success(vehicles)
             } else {
                 if (response.code() == 401 || response.code() == 403) {
-                    preferencesManager.clearSession(requirePassword = true)
-                    Result.Error("Session expired. Please sign in again.", response.code())
+                    sessionExpiredError(response.code())
                 } else {
                     Result.Error("Failed to fetch vehicles (${response.code()})")
                 }

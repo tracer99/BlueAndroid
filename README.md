@@ -213,7 +213,9 @@ Implemented Canadian flows:
 | Europe | Refresh-token or password login (no device MFA step) |
 | Australia / New Zealand | Standard OAuth sign-in (no device MFA step) |
 
-The 4-digit **Bluelink PIN** collected at login is for remote commands (lock, climate, etc.), not login 2FA.
+BlueDeck’s Canada login uses the **mybluelink.ca web portal** API (`from: CWP`). That path can require device MFA (`7110`) even when the official native app does not. After MFA, use **Trust this device for 90 days** to reduce repeat prompts.
+
+The 4-digit **Bluelink PIN** collected at login is for remote commands (lock, climate, etc.), not login 2FA. Entering it on the login screen saves it so you are not prompted on every command.
 
 Currently not mapped for Canada: horn/lights, vehicle location, and charge-target editing.
 

@@ -148,6 +148,7 @@ class MainActivity : FragmentActivity() {
 
             LaunchedEffect(
                 isLoggedIn,
+                otpPending,
                 biometricEnabled,
                 biometricUnlockMode,
                 biometricUnlocked,
@@ -166,6 +167,15 @@ class MainActivity : FragmentActivity() {
 
                 when (isLoggedIn) {
                     true -> {
+                        // Defensive: OTP pending means session was invalidated for MFA — never stay on dashboard.
+                        if (otpPending) {
+                            biometricUnlocked = false
+                            biometricReauthInProgress = false
+                            navigateRoot("login")
+                            authViewModel.resumePendingOtp()
+                            return@LaunchedEffect
+                        }
+
                         biometricReauthInProgress = false
                         if (shouldPromptOnAppOpen && !biometricGateReady) {
                             return@LaunchedEffect

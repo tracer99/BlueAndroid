@@ -75,7 +75,7 @@ fun ServicePinPromptDialog(
                         onCheckedChange = { savePin = it }
                     )
                     Text(
-                        "Save PIN for future commands",
+                        "Save PIN for future commands so you are not asked again each time.",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.weight(1f)
                     )

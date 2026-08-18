@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bluedeck.data.models.*
+import com.bluedeck.data.auth.OTP_REQUIRED_CODE
 import com.bluedeck.data.repository.PreferencesManager
 import com.bluedeck.data.repository.Result
 import com.bluedeck.data.repository.VehicleRepository
@@ -203,11 +204,8 @@ class VehicleViewModel @Inject constructor(
                 }
                 is Result.Error -> {
                     _statusError.value = result.message
-                    if (result.message.contains("Session expired", ignoreCase = true) ||
-                        result.message.contains("verification", ignoreCase = true)
-                    ) {
-                        _vehicleStatus.value = null
-                        _selectedVehicle.value = null
+                    if (isSessionAuthFailure(result.message, result.code)) {
+                        handleSessionAuthFailure(result.message, result.code)
                     }
                 }
                 else -> Unit
@@ -242,12 +240,72 @@ class VehicleViewModel @Inject constructor(
         viewModelScope.launch {
             // Re-validate the persisted session and pull current vehicle/status data after the app is reopened.
             // This prevents a valid-looking local session from displaying stale or empty vehicle data.
-            loadVehicles()
+            when (val validation = repository.validateSession()) {
+                is Result.Error -> {
+                    if (isSessionAuthFailure(validation.message, validation.code)) {
+                        handleSessionAuthFailure(validation.message, validation.code)
+                        return@launch
+                    }
+                    _statusError.value = validation.message
+                }
+                else -> Unit
+            }
+
+            when (val result = repository.getVehicles()) {
+                is Result.Success -> {
+                    val vehicles = result.data.map { repository.mergeSeatConfigurations(it) }
+                    _vehicles.value = vehicles
+                    val savedVin = preferencesManager.selectedVin.first()
+                    val vehicle = vehicles.find { it.vin == savedVin } ?: vehicles.firstOrNull()
+                    vehicle?.let { selectVehicle(it) }
+                }
+                is Result.Error -> {
+                    _statusError.value = result.message
+                    if (isSessionAuthFailure(result.message, result.code)) {
+                        handleSessionAuthFailure(result.message, result.code)
+                        return@launch
+                    }
+                }
+                else -> Unit
+            }
+
             delay(750)
             _selectedVehicle.value?.let { selected ->
-                refreshStatusInternal(vehicle = selected, forceFromServer = true, showLoading = false)
+                when (
+                    val statusResult = refreshStatusInternal(
+                        vehicle = selected,
+                        forceFromServer = true,
+                        showLoading = false
+                    )
+                ) {
+                    is Result.Error -> {
+                        if (isSessionAuthFailure(statusResult.message, statusResult.code)) {
+                            handleSessionAuthFailure(statusResult.message, statusResult.code)
+                        }
+                    }
+                    else -> Unit
+                }
             }
         }
+    }
+
+    private fun isSessionAuthFailure(message: String, code: Int? = null): Boolean {
+        if (code == OTP_REQUIRED_CODE) return true
+        return message.contains("Session expired", ignoreCase = true) ||
+            message.contains("sign in again", ignoreCase = true) ||
+            message.contains("Not authenticated", ignoreCase = true) ||
+            message.contains("verification code", ignoreCase = true)
+    }
+
+    private suspend fun handleSessionAuthFailure(message: String, code: Int? = null) {
+        _statusError.value = message
+        _vehicleStatus.value = null
+        _selectedVehicle.value = null
+        _vehicles.value = emptyList()
+        // OTP pending already cleared tokens via setOtpPending — do not wipe the challenge.
+        if (code == OTP_REQUIRED_CODE) return
+        // Belt-and-suspenders: ensure tokens are cleared so MainActivity routes to login.
+        repository.logout(requirePassword = true)
     }
 
     fun refreshStatus(forceFromServer: Boolean = true) {
